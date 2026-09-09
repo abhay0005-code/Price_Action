@@ -1,0 +1,20 @@
+# Secrets - never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Data / generated files
+data/
+security_id_list.csv
+
+# Scratch / one-off scripts
+_*.py
+
+# OS / editor
+.DS_Store
+Thumbs.db
