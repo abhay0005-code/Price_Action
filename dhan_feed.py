@@ -60,7 +60,40 @@ OPTIONABLE_INDEXES = {
 
 TIMEFRAME_MINUTES = {"5m": 5, "15m": 15, "1h": 60}
 
+# Canonical index name -> INDEX_ALIASES key. Keys are matched as a prefix so we
+# can normalize Dhan-style artifacts (e.g. index-future symbols) and stray
+# inputs like "BANKNIFTYIFT" / "BANKNIFTY FUT" back to the index.
+INDEX_FAMILY_ROOTS = {
+    "NIFTY50": "NIFTY 50",
+    "NIFTY": "NIFTY 50",
+    "BANKNIFTY": "BANKNIFTY",
+    "FINNIFTY": "FINNIFTY",
+    "MIDCPNIFTY": "MIDCPNIFTY",
+    "SENSEX": "SENSEX",
+}
+
+# Extra suffixes (e.g. Dhan index-future naming) that should be ignored when
+# they trail a known index family root.
+_INDEX_ARTIFACTS = {"IFT", "FUT", "FUTURES", "IDX", "INDEX"}
+
 _master_cache: pd.DataFrame | None = None
+
+
+def _normalize_index_query(query: str) -> str:
+    """Map a raw input to a canonical INDEX_ALIASES key when possible.
+
+    Handles spaces ("BANK NIFTY" -> "BANKNIFTY") and trailing artifacts such as
+    Dhan's "IFT" index-future suffix ("BANKNIFTYIFT" -> "BANKNIFTY").
+    """
+    q = query.strip().upper().replace(" ", "")
+    if q in INDEX_ALIASES:
+        return q
+    for root, alias in INDEX_FAMILY_ROOTS.items():
+        if q.startswith(root):
+            suffix = q[len(root):]
+            if not suffix or suffix in _INDEX_ARTIFACTS:
+                return alias
+    return q
 
 
 def _security_master() -> pd.DataFrame:
@@ -82,7 +115,7 @@ def resolve_symbol(symbol: str) -> dict[str, Any]:
     Raises:
         ValueError: when the symbol cannot be resolved.
     """
-    query = symbol.strip().upper()
+    query = _normalize_index_query(symbol).strip().upper()
 
     if query in INDEX_ALIASES:
         sid = INDEX_ALIASES[query]
@@ -231,6 +264,7 @@ class LiveSignalEngine:
         self._thread: threading.Thread | None = None
         self.status = "not started"
         self.error = ""
+        self.last_tick_at: datetime | None = None
         self._last_snapshot: dict[str, Any] | None = None
         self._last_closed: dict[str, Any] | None = None
         self.placed_fingerprint: str | None = None
@@ -337,6 +371,7 @@ class LiveSignalEngine:
         self._feed = feed
         self._thread = threading.Thread(target=feed.run, daemon=True)
         self._thread.start()
+        threading.Thread(target=self._watchdog, daemon=True).start()
 
     def _on_connect(self, instance) -> None:
         self.status = (
@@ -345,7 +380,24 @@ class LiveSignalEngine:
         )
 
     def _on_error(self, instance, error) -> None:
-        self.error = str(error)
+        friendly = _dhan_error_text(error)
+        self.error = friendly
+        self.status = f"error: {friendly}"
+
+    def _watchdog(self) -> None:
+        """Flag a silently-stuck connection (open socket, no ticks, no error)."""
+        time.sleep(20)
+        feed = self._feed
+        if feed is None or feed is not self._feed:
+            return
+        if self.last_tick_at is None and not self.error:
+            ip = _dhan_public_ip()
+            hint = f" (server public IP: {ip})" if ip else ""
+            self.error = (
+                "No ticks received 20s after connecting - this usually means the "
+                f"server's public IP is not whitelisted in the DhanHQ console{hint}, "
+                "or the market is closed."
+            )
 
     def _on_message(self, instance, msg: dict) -> Any:
         if not isinstance(msg, dict) or msg.get("type") != "Quote Data":
@@ -356,6 +408,8 @@ class LiveSignalEngine:
             return
         with self.lock:
             now = datetime.now(IST)
+            self.last_tick_at = now
+            self.error = ""
             volume_now = msg.get("volume") or 0
             bucket_start = self._bucket_start(now)
             if self.current is None or bucket_start > self.current["start"]:
@@ -484,15 +538,20 @@ class LiveSignalEngine:
             return summary, display
 
     # ------------------------------------------------------------------- AI
-    def set_llm(self, provider: str | None = None, model: str | None = None) -> None:
+    def set_llm(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         """Select an LLM provider/model from the UI; forces the next AI pass.
 
         The verdict is recomputed the next time ``ai_signal`` is polled after
         the selection changes.
         """
-        sig = ((provider or "").strip(), (model or "").strip())
+        sig = ((provider or "").strip(), (model or "").strip(), (api_key or "").strip())
         if sig != self._ai_llm_applied:
-            self.ai_engine.set_llm(provider=provider, model=model)
+            self.ai_engine.set_llm(provider=provider, model=model, api_key=api_key)
             self._ai_llm_applied = sig
             self._ai_force = True
 

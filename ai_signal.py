@@ -37,7 +37,13 @@ with warnings.catch_warnings():
     from statsmodels.tsa.arima.model import ARIMA
     from arch import arch_model
 
-import xgboost as xgb
+try:
+    import xgboost as xgb
+
+    XGB_OK = True
+except Exception:  # noqa: BLE001 - XGBoost is optional for lightweight deployments
+    xgb = None
+    XGB_OK = False
 
 try:
     import torch
@@ -216,6 +222,8 @@ class XGBoostModel:
         self._lock = threading.Lock()
 
     def report(self, df: pd.DataFrame) -> dict[str, Any]:
+        if not XGB_OK:
+            return {"active": False, "note": "xgboost not installed"}
         if len(df) - self._trained_on >= self.retrain_every:
             self._fit(df)
         if self._model is None:
@@ -238,6 +246,8 @@ class XGBoostModel:
         }
 
     def _fit(self, df: pd.DataFrame) -> None:
+        if not XGB_OK:
+            return
         with self._lock:
             feats = build_features(df)
             close = df["close"].astype(float).to_numpy()
@@ -267,7 +277,7 @@ class XGBoostModel:
             self._trained_on = len(df)
 
 
-class _LSTMWrapper(nn.Module):
+class _LSTMWrapper(nn.Module if TORCH_OK else object):
     def __init__(self, n_features: int, hidden: int = 24):
         super().__init__()
         self.lstm = nn.LSTM(
@@ -529,7 +539,12 @@ class LLMJudge:
     or the provider's own env var (see below).
     """
 
-    def __init__(self, provider: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         self.timeout = float(os.environ.get("LLM_TIMEOUT", "45"))
         provider = (
             (provider or "").strip().lower()
@@ -543,7 +558,7 @@ class LLMJudge:
         )
         key_env = cfg.get("key_env")
         self._key_env = str(key_env) if key_env else None
-        self.api_key = (os.environ.get("LLM_API_KEY") or "").strip()
+        self.api_key = (api_key or os.environ.get("LLM_API_KEY") or "").strip()
         if not self.api_key and self._key_env:
             self.api_key = (os.environ.get(self._key_env) or "").strip()
         self.style = str(cfg.get("style", "openai")) or "openai"
@@ -753,9 +768,14 @@ class AISignalEngine:
             return 0.0
         return total / max_score
 
-    def set_llm(self, provider: str | None = None, model: str | None = None) -> None:
+    def set_llm(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         """Swap the LLM judge to a given provider/model (UI dropdown selection)."""
-        self.llm = LLMJudge(provider=provider, model=model)
+        self.llm = LLMJudge(provider=provider, model=model, api_key=api_key)
 
     # -------------------------------------------------------------- entry point
     def analyze(self, df: pd.DataFrame) -> dict[str, Any]:

@@ -55,6 +55,9 @@ def resolve_symbol(symbol: str) -> dict[str, Any]:
 class FinnhubLiveEngine:
     """Streams Finnhub ticks, builds candles and emits price-action signals."""
 
+    provider_name = "finnhub"
+    seed_provider = "finnhub"
+
     def __init__(
         self,
         symbol: str,
@@ -68,8 +71,8 @@ class FinnhubLiveEngine:
     ) -> None:
         if timeframe not in TIMEFRAME_MINUTES:
             raise ValueError(f"timeframe must be one of {list(TIMEFRAME_MINUTES)}")
-        self.provider_name = "finnhub"
-        self.seed_provider = "finnhub"
+        self.provider_name = getattr(type(self), "provider_name", "finnhub")
+        self.seed_provider = getattr(type(self), "seed_provider", self.provider_name)
         self._validate_credentials()
         self._finnhub = self._make_feed_client()
 
@@ -507,11 +510,16 @@ class FinnhubLiveEngine:
 
     # ---------------------------------------------------------------- AI
 
-    def set_llm(self, provider: str | None = None, model: str | None = None) -> None:
+    def set_llm(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         """Select an LLM provider/model from the UI; forces the next AI pass."""
-        sig = ((provider or "").strip(), (model or "").strip())
+        sig = ((provider or "").strip(), (model or "").strip(), (api_key or "").strip())
         if sig != self._ai_llm_applied:
-            self.ai_engine.set_llm(provider=provider, model=model)
+            self.ai_engine.set_llm(provider=provider, model=model, api_key=api_key)
             self._ai_llm_applied = sig
             self._ai_force = True
 

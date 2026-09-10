@@ -168,3 +168,41 @@ Notes
 - Indices return only the current-day candle from Dhan's intraday API, so index signals
   warm up as candles close during the live session.
 - Needs an active Dhan Data API plan; if markets are closed, live ticks simply wait.
+
+## Web Terminal (React/Next.js + FastAPI)
+
+A second frontend in `web/` (App Router, TypeScript, `lightweight-charts`) backed by a
+small FastAPI server (`server/`) that reuses the exact same live engines as the Gradio
+app: **US Live (Alpaca IEX or Finnhub, yfinance fallback)** and **Dhan NSE live feed**.
+
+Features mirrored from the Gradio UI:
+
+- Three data sources with one click: `US · Alpaca`, `US · Finnhub`, `Dhan · NSE`.
+- Symbol combobox (US presets and Dhan presets + custom symbols), timeframe (5m/15m/1h),
+  strategy (Price Action / Trend Reversal / Breakout & Breakdown) and EMA/pivot params.
+- Candlestick chart with EMA 9/21/169 + VWAP overlay toggles and a live in-progress bar.
+- Trend / Signal badge (TREND UPTREND ▲ + SIGNAL BUY), signal panel
+  (side, confidence, RVOL, RSI, BOS, FVG, S/R) and AI analysis panel with model votes.
+- Watchlist with live US quotes and % change; every row switches the feed.
+- Live updates every ~1s over WebSocket (price + live candle); snapshot/candles refresh
+  by polling. The web UI previews trades only - it never places orders.
+
+Run it (two terminals):
+
+```powershell
+# 1) backend - serves both US and Dhan live feeds
+.\.venv\Scripts\python.exe -m uvicorn server.main:app --host 0.0.0.0 --port 8000
+
+# 2) frontend
+cd web
+npm install
+npm run dev       # http://localhost:3000
+```
+
+Production build: `npm run build` then `npm start`. The frontend proxies REST calls
+same-origin through `/api/proxy`, which forwards to `BACKEND_URL` (default
+`http://127.0.0.1:8000`); the WebSocket connects to `NEXT_PUBLIC_WS_URL` (default
+`ws://localhost:8000`). See `web/.env.local.example`.
+
+Credentials for all three feeds come from `.env` (see above): Alpaca, Finnhub and
+Dhan. The health bar in the UI shows which feeds are configured.
