@@ -280,10 +280,25 @@ def _format_ai(ai):
     ind = ai.get("indicators", {})
     rsi = ind.get("rsi")
     lines.append(
-        f"  RSI {rsi:.1f} | EMA169 {ind.get('ema169', float('nan')):.2f}"
-        f" | EMA9 {ind.get('ema9', float('nan')):.2f} | EMA21 {ind.get('ema21', float('nan')):.2f}"
-        f" | close-vs-169 {ind.get('close_vs_ema169_pct', 0.0):+.2f}% | vol-z {ind.get('vol_z', 0.0):+.2f}"
+        f"  RSI {rsi:.1f} | EMA9 {ind.get('ema9', float('nan')):.2f}"
+        f" | EMA21 {ind.get('ema21', float('nan')):.2f}"
+        f" | EMA50 {ind.get('ema50', float('nan')):.2f}"
+        f" | EMA169 {ind.get('ema169', float('nan')):.2f}"
     )
+    lines.append(
+        f"  close-vs-169 {ind.get('close_vs_ema169_pct', 0.0):+.2f}%"
+        f" | vol {ind.get('volatility_pct', 0.0):.3f}%"
+        f" | vol-z {ind.get('vol_z', 0.0):+.2f}"
+        f" | shape {ind.get('candle_shape', 'n/a')}"
+        f" | body {ind.get('body_ratio', float('nan')):+.2f}"
+    )
+    if ind.get("breakout_up") or ind.get("breakout_down"):
+        flags = []
+        if ind.get("breakout_up"):
+            flags.append("UP")
+        if ind.get("breakout_down"):
+            flags.append("DOWN")
+        lines.append(f"  RANGE BREAKOUT: {' / '.join(flags)}")
     lines.append("")
     lines.append("MODEL VOTES:")
     vote_txt = {1: "BUY", -1: "SELL", 0: "HOLD"}

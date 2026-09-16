@@ -112,6 +112,30 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def candle_shape(body: float | None) -> str:
+    """Human-readable candle shape from the body-to-range ratio.
+
+    ``body`` = (close - open) / (high - low): +1 full-body bullish,
+    -1 full-body bearish, ~0 doji / small real body.
+    """
+    if body is None:
+        return "unknown"
+    b = float(body)
+    if not np.isfinite(b):
+        return "unknown"
+    if abs(b) < 0.1:
+        return "doji"
+    if b > 0.7:
+        return "long_bullish_marubozu"
+    if b > 0.3:
+        return "bullish_spread"
+    if b < -0.7:
+        return "long_bearish_marubozu"
+    if b < -0.3:
+        return "bearish_spread"
+    return "small_body"
+
+
 def _vote_name(vote: float) -> str:
     return {1: "BUY", -1: "SELL", 0: "HOLD"}.get(int(np.sign(vote)), "HOLD")
 
@@ -493,8 +517,9 @@ LLM_PROVIDERS: dict[str, dict[str, Any]] = {
         "style": "openai",
         "base": "https://generativelanguage.googleapis.com/v1beta/openai",
         "key_env": "GEMINI_API_KEY",
-        "default_model": "gemini-2.5-pro",
+        "default_model": "gemini-3.5-flash-lite",
         "models": [
+            "gemini-3.5-flash-lite", "gemini-3.5-flash",
             "gemini-2.5-flash", "gemini-2.5-pro",
             "gemini-2.0-flash", "gemini-2.0-flash-lite",
             "gemini-1.5-flash", "gemini-1.5-pro",
@@ -817,13 +842,20 @@ class AISignalEngine:
         indicators = {
             "price": f(feats.get("close", last["close"])),
             "rsi": f(feats.get("rsi")),
-            "ema169": f(feats.get("ema169")),
-            "ema21": f(feats.get("ema21")),
             "ema9": f(feats.get("ema9")),
+            "ema21": f(feats.get("ema21")),
+            "ema50": f(feats.get("ema50")),
+            "ema169": f(feats.get("ema169")),
             "close_vs_ema169_pct": f(feats.get("dist169") * 100.0),
             "slope169": f(feats.get("slope169")),
+            "volatility_pct": f(feats.get("vol20") * 100.0),
+            "vol_scale": f(feats.get("vol_scale")),
             "vol_z": f(feats.get("vol_z")),
-            "vol20_pct": f(feats.get("vol20") * 100.0),
+            "candle_shape": candle_shape(feats.get("body")),
+            "body_ratio": f(feats.get("body")),
+            "range_pct": f(feats.get("range") * 100.0),
+            "breakout_up": bool(feats.get("brk_up")),
+            "breakout_down": bool(feats.get("brk_dn")),
         }
 
         reasons = []

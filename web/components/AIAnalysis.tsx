@@ -191,13 +191,26 @@ export default function AIAnalysis({
                   <div>
                     <div className="muted">INDICATORS:</div>
                     <div>
-                      RSI {fmt(ind.rsi as number | undefined, 1)} | EMA169{" "}
-                      {fmt(ind.ema169 as number | undefined, 2)} | EMA9{" "}
+                      RSI {fmt(ind.rsi as number | undefined, 1)} | EMA9{" "}
                       {fmt(ind.ema9 as number | undefined, 2)} | EMA21{" "}
-                      {fmt(ind.ema21 as number | undefined, 2)} | close-vs-169{" "}
-                      {pct((ind.close_vs_ema169_pct as number | undefined ?? 0) * 100)} | vol-z{" "}
-                      {fmt(ind.vol_z as number | undefined, 2)}
+                      {fmt(ind.ema21 as number | undefined, 2)} | EMA50{" "}
+                      {fmt(ind.ema50 as number | undefined, 2)} | EMA169{" "}
+                      {fmt(ind.ema169 as number | undefined, 2)}
                     </div>
+                    <div>
+                      close-vs-169 {pct(ind.close_vs_ema169_pct as number | undefined)} | vol{" "}
+                      {pct(ind.volatility_pct as number | undefined)} | vol-z{" "}
+                      {fmt(ind.vol_z as number | undefined, 2)} | shape{" "}
+                      {ind.candle_shape as string ?? "n/a"} | body{" "}
+                      {fmt(ind.body_ratio as number | undefined, 2)}
+                    </div>
+                    {(ind.breakout_up as boolean) || (ind.breakout_down as boolean) ? (
+                      <div>
+                        RANGE BREAKOUT:{" "}
+                        <b className="up">{(ind.breakout_up as boolean) ? "UP" : ""}</b>{" "}
+                        <b className="down">{(ind.breakout_down as boolean) ? "DOWN" : ""}</b>
+                      </div>
+                    ) : null}
                   </div>
                 )}
 

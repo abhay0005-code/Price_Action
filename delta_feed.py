@@ -107,7 +107,7 @@ class DeltaIndiaLiveEngine:
     def start(self):
         seed=self._seed()
         if not seed: seed=self._synth()
-        if not seed: self.status="error: delta unreachable"; return self.status
+        if not seed: raise RuntimeError("Delta: unable to fetch candles for this symbol")
         with self.lock:
             self.history=pd.DataFrame(seed); self._ingest()
         self.status=f"LIVE {self.display} via Delta {self.timeframe} | connecting..."
@@ -173,7 +173,10 @@ class DeltaIndiaLiveEngine:
         row={"timestamp":c["start"],"open":c["open"],"high":c["high"],"low":c["low"],"close":c["close"],"volume":float(c.get("ticks",0))}
         self.history=pd.concat([self.history,pd.DataFrame([row])],ignore_index=True)
         try:
-            s=str(self.strategy.signal(row,self.history)).upper(); side="BUY" if "BUY" in s else ("SELL" if "SELL" in s else "HOLD")
+            sig=self.strategy.generate_signal(self.history)
+            last=sig.iloc[-1]
+            side=str(last.get("signal","HOLD")).upper()
+            if side not in ("BUY","SELL","HOLD"): side="HOLD"
             self._last_closed={"signal":side,"price":float(row["close"]),"timestamp":str(row["timestamp"])}
         except Exception: pass
         self._ai_force=True
@@ -221,7 +224,11 @@ class DeltaIndiaLiveEngine:
         e9=cl.ewm(span=9,adjust=False).mean().iloc[-1]; e21=cl.ewm(span=21,adjust=False).mean().iloc[-1]
         e169=cl.ewm(span=169,adjust=False).mean().iloc[-1] if len(cl)>=2 else cl.iloc[-1]
         if lc is None:
-            try: s=str(self.strategy.signal(fr.iloc[-1].to_dict(),fr)).upper(); side="BUY" if "BUY" in s else ("SELL" if "SELL" in s else "HOLD")
+            try:
+                sig=self.strategy.generate_signal(fr)
+                last=sig.iloc[-1]
+                side=str(last.get("signal","HOLD")).upper()
+                if side not in ("BUY","SELL","HOLD"): side="HOLD"
             except Exception: side="HOLD"
             lc={"signal":side,"price":float(fr["close"].iloc[-1]),"timestamp":str(fr["timestamp"].iloc[-1])}
         lp=float(live["close"]) if live else float(fr["close"].iloc[-1])

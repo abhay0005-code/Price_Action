@@ -93,6 +93,9 @@ export default function Terminal() {
   const llmApiKeyRef = useRef("");
   const [llmConn, setLlmConn] = useState<"unknown" | "ok" | "fail">("unknown");
 
+  // true once the symbol preset list for the current market has loaded
+  const [symbolsReady, setSymbolsReady] = useState(false);
+
   // eager refs for the WS handler
   const activeRef = useRef(activeSymbol);
   activeRef.current = activeSymbol;
@@ -127,9 +130,11 @@ export default function Terminal() {
   // symbol presets follow the market
   useEffect(() => {
     let cancelled = false;
+    setSymbolsReady(false);
     symbols(market).then((s) => {
       if (cancelled) return;
       setSymbolOptions(s.symbols);
+      setSymbolsReady(true);
       setActiveSymbol((cur) => {
         if (s.symbols.includes(cur)) {
           if (lastApplyRef.current !== `${market}:${provider}:${cur}`) requestConnect();
@@ -150,12 +155,13 @@ export default function Terminal() {
   const requestConnect = useCallback(() => setConnectKey((k) => k + 1), []);
   useEffect(() => {
     if (!backendUp) return;
+    if (!symbolsReady) return;
     if (market === "us" && !healthData?.markets?.us?.configured) return;
     if (market === "dhan" && !healthData?.markets?.dhan?.configured) return;
     applySelection(activeSymbol);
     lastApplyRef.current = `${market}:${provider}:${activeSymbol}`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectKey, backendUp]);
+  }, [connectKey, backendUp, symbolsReady]);
 
   // ------------------------------------------------------------- watchlist
   useEffect(() => {

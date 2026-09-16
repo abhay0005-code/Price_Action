@@ -18,6 +18,7 @@ from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestTradeRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
+from ai_signal import llm_default_model
 from alpaca_feed import AlpacaLiveEngine
 from finnhub_feed import FinnhubLiveEngine
 from alphavantage_feed import AlphaVantageLiveEngine
@@ -135,7 +136,7 @@ class TerminalManager:
         self._lock = threading.Lock()
         self._pending_llm: tuple[str, str, str] = (
             (os.environ.get("LLM_PROVIDER") or "gemini").strip().lower(),
-            (os.environ.get("LLM_MODEL") or "").strip() or "gemini-2.5-pro",
+            (os.environ.get("LLM_MODEL") or "").strip() or llm_default_model("gemini"),
             "",
         )
         self._last_ai_compute = 0.0
