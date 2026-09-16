@@ -488,6 +488,18 @@ LLM_PROVIDERS: dict[str, dict[str, Any]] = {
             "claude-opus-4-1",
         ],
     },
+    "gemini": {
+        "label": "Gemini (Google, paid)",
+        "style": "openai",
+        "base": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "key_env": "GEMINI_API_KEY",
+        "default_model": "gemini-2.5-pro",
+        "models": [
+            "gemini-2.5-flash", "gemini-2.5-pro",
+            "gemini-2.0-flash", "gemini-2.0-flash-lite",
+            "gemini-1.5-flash", "gemini-1.5-pro",
+        ],
+    },
     "chatgpt": {
         "label": "ChatGPT (OpenAI, paid)",
         "style": "openai",
@@ -551,7 +563,10 @@ class LLMJudge:
             or (os.environ.get("LLM_PROVIDER") or "").strip().lower()
         )
         cfg = LLM_PROVIDERS.get(provider) or {}
-        self.provider = provider or "custom"
+        if not cfg:
+            provider = "gemini"
+            cfg = LLM_PROVIDERS[provider]
+        self.provider = provider
         self.base_url = (
             (os.environ.get("LLM_BASE_URL") or "").strip().rstrip("/")
             or str(cfg.get("base", ""))
@@ -785,7 +800,7 @@ class AISignalEngine:
                 f"warming up - need >= {self.min_bars} closed bars, have {len(df)}"
             )
         last = df.iloc[-1]
-        f = lambda x: float(x) if pd.notna(x) else float("nan")  # noqa: E731
+        f = lambda x: (float(x) if pd.notna(x) and np.isfinite(float(x)) else None)  # noqa: E731
 
         models = self._models(df)
         strategies = self._strategies(df)

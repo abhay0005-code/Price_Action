@@ -3,8 +3,8 @@
 import { useState } from "react";
 import type { Health } from "@/lib/api";
 
-export type Market = "us" | "dhan";
-export type Provider = "alpaca" | "finnhub";
+export type Market = "us" | "dhan" | "delta";
+export type Provider = "alpaca" | "finnhub" | "alphavantage" | "delta";
 
 export const STRATEGIES = [
   { value: "price_action", label: "Price Action" },
@@ -50,6 +50,10 @@ function dhanConfigured(health: Health | null) {
   return health?.markets?.dhan?.configured ?? false;
 }
 
+function deltaConfigured(health: Health | null) {
+  return (health as unknown as { markets?: { delta?: { configured?: boolean } } })?.markets?.delta?.configured ?? true;
+}
+
 export default function Toolbar(props: Props) {
   const {
     health, market, provider, timeframe, strategy,
@@ -61,6 +65,7 @@ export default function Toolbar(props: Props) {
 
   const us = usConfigured(health);
   const dhan = dhanConfigured(health);
+  const delta = deltaConfigured(health);
 
   const pick = (m: Market, p: Provider) => {
     if (m === "us" && !us) return;
@@ -89,12 +94,28 @@ export default function Toolbar(props: Props) {
             US · Finnhub
           </button>
           <button
+            className={`seg-btn ${market === "us" && provider === "alphavantage" ? "on" : ""}`}
+            onClick={() => pick("us", "alphavantage")}
+            disabled={!us}
+            title={us ? "US equities via Alpha Vantage (REST polling)" : "ALPHAVANTAGE_API_KEY not configured"}
+          >
+            US · Alpha Vantage
+          </button>
+          <button
             className={`seg-btn ${market === "dhan" ? "on" : ""}`}
             onClick={() => pick("dhan", "finnhub")}
             disabled={!dhan}
             title={dhan ? "NSE equities via DhanHQ" : "DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN not configured"}
           >
             Dhan · NSE
+          </button>
+          <button
+            className={`seg-btn ${market === "delta" ? "on" : ""}`}
+            onClick={() => pick("delta", "delta")}
+            disabled={!delta}
+            title="Crypto via Delta Exchange India (no key needed for data)"
+          >
+            Delta · Crypto
           </button>
         </div>
 
@@ -204,7 +225,7 @@ export default function Toolbar(props: Props) {
       )}
       {market === "us" && !us && (
         <div className="banner warn" style={{ margin: 8 }}>
-          No US data provider configured - set APCA_API_KEY_ID / APCA_API_SECRET_KEY or FINNHUB_API_KEY in .env
+          no US data provider configured - set APCA_API_KEY_ID / APCA_API_SECRET_KEY, FINNHUB_API_KEY or ALPHAVANTAGE_API_KEY in .env
         </div>
       )}
     </div>

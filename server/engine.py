@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -19,11 +20,34 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from alpaca_feed import AlpacaLiveEngine
 from finnhub_feed import FinnhubLiveEngine
+from alphavantage_feed import AlphaVantageLiveEngine
+from delta_feed import DELTA_PRESETS, DeltaIndiaLiveEngine, fetch_tickers, ticker_price
 from server import indicators
 
 load_dotenv()
 
 UTC = ZoneInfo("UTC")
+
+
+def _sanitize_json(obj):
+    """Recursively convert NaN/Inf float values to None so FastAPI json.dumps never 500s."""
+    try:
+        import math
+        import numpy as _np
+        _np_types = (_np.floating,)
+    except Exception:
+        _np_types = ()
+    if isinstance(obj, float) or (_np_types and isinstance(obj, _np_types)):
+        try:
+            v = float(obj)
+        except (TypeError, ValueError):
+            return None
+        return v if math.isfinite(v) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
 
 DEFAULT_WATCHLIST = ["AAPL", "NVDA", "TSLA", "MSFT", "SPY", "QQQ"]
 DEFAULT_TIMEFRAME = "5m"
@@ -31,6 +55,8 @@ DEFAULT_TIMEFRAME = "5m"
 US_PRESET_SYMBOLS = [
     "AAPL", "TSLA", "NVDA", "SPY", "QQQ", "MSFT",
     "AMZN", "META", "GOOGL", "AMD", "JPM",
+    # Commodities & FX (work with the alphavantage provider)
+    "GOLD", "SILVER", "WTI", "BRENT", "EURUSD", "USDINR",
 ]
 
 DHAN_PRESET_SYMBOLS = [
@@ -40,8 +66,16 @@ DHAN_PRESET_SYMBOLS = [
     "NIFTY 50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
 ]
 
+DELTA_PRESET_SYMBOLS = list(DELTA_PRESETS)
+
 _PREV_CLOSE_TTL = 60.0
 _SNAPSHOT_CACHE_MS = 1500  # debounce expensive indicator recompute
+
+# AI / LLM analysis cadence: the active engine is re-analyzed (including a
+# fresh LLM verdict) at least this often, even when no new candle has
+# closed. Override with an env var, e.g. AI_REFRESH_SECONDS=300 for 5 min.
+AI_REFRESH_SECONDS = float(os.environ.get("AI_REFRESH_SECONDS", "300"))
+_AI_SCHEDULER_TICK = 5.0
 
 
 def _has_alpaca_keys() -> bool:
@@ -54,14 +88,23 @@ def _has_finnhub_keys() -> bool:
     return bool((os.environ.get("FINNHUB_API_KEY") or "").strip())
 
 
+def _has_alphavantage_keys() -> bool:
+    return bool((os.environ.get("ALPHAVANTAGE_API_KEY") or "").strip())
+
+
 def _has_dhan_keys() -> bool:
     return bool((os.environ.get("DHAN_CLIENT_ID") or "").strip()) and bool(
         (os.environ.get("DHAN_ACCESS_TOKEN") or "").strip()
     )
 
 
+def _has_delta_keys() -> bool:
+    # Delta India public market data needs no key; optional key enables future trading.
+    return True
+
+
 def _has_us_keys() -> bool:
-    return _has_alpaca_keys() or _has_finnhub_keys()
+    return _has_alpaca_keys() or _has_finnhub_keys() or _has_alphavantage_keys()
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -78,11 +121,11 @@ class TerminalManager:
 
     def __init__(self, watchlist: list[str] | None = None) -> None:
         self.symbols = list(watchlist or DEFAULT_WATCHLIST)
-        self.custom_symbols: dict[str, list[str]] = {"us": [], "dhan": []}
+        self.custom_symbols: dict[str, list[str]] = {"us": [], "dhan": [], "delta": []}
         self.active_symbol: str = ""
         self.market: str = "us"  # "us" | "dhan"
         self.provider: str = self._default_us_provider()
-        self.engine: AlpacaLiveEngine | FinnhubLiveEngine | LiveSignalEngine | None = None
+        self.engine: AlpacaLiveEngine | FinnhubLiveEngine | AlphaVantageLiveEngine | LiveSignalEngine | None = None
         self._hist: StockHistoricalDataClient | None = None
         self._prev_close_cache: tuple[float, dict] | None = None
         self._clock_cache: tuple[float, dict] | None = None
@@ -91,10 +134,16 @@ class TerminalManager:
         self._selection: tuple = ()
         self._lock = threading.Lock()
         self._pending_llm: tuple[str, str, str] = (
-            (os.environ.get("LLM_PROVIDER") or "ollama").strip().lower(),
-            (os.environ.get("LLM_MODEL") or "").strip(),
+            (os.environ.get("LLM_PROVIDER") or "gemini").strip().lower(),
+            (os.environ.get("LLM_MODEL") or "").strip() or "gemini-2.5-pro",
             "",
         )
+        self._last_ai_compute = 0.0
+        self._ai_stop = threading.Event()
+        self._ai_thread = threading.Thread(
+            target=self._ai_scheduler, name="ai-scheduler", daemon=True
+        )
+        self._ai_thread.start()
 
     # ------------------------------------------------------------------ config
 
@@ -109,8 +158,9 @@ class TerminalManager:
     @property
     def markets(self) -> dict:
         return {
-            "us": {"configured": _has_us_keys(), "alpaca": _has_alpaca_keys(), "finnhub": _has_finnhub_keys()},
+            "us": {"configured": _has_us_keys(), "alpaca": _has_alpaca_keys(), "finnhub": _has_finnhub_keys(), "alphavantage": _has_alphavantage_keys()},
             "dhan": {"configured": _has_dhan_keys()},
+            "delta": {"configured": _has_delta_keys()},
         }
 
     def _hist_client(self) -> StockHistoricalDataClient | None:
@@ -142,8 +192,8 @@ class TerminalManager:
             provider = "finnhub"
         if not symbol:
             raise ValueError("symbol is required")
-        if provider not in ("alpaca", "finnhub"):
-            raise ValueError("provider must be 'alpaca' or 'finnhub'")
+        if provider not in ("alpaca", "finnhub", "alphavantage"):
+            raise ValueError("provider must be 'alpaca', 'finnhub' or 'alphavantage'")
         if provider == "alpaca" and not _has_alpaca_keys():
             raise RuntimeError(
                 "Alpaca keys not configured. Set APCA_API_KEY_ID / "
@@ -153,8 +203,17 @@ class TerminalManager:
             raise RuntimeError(
                 "Finnhub key not configured. Set FINNHUB_API_KEY in .env"
             )
+        if provider == "alphavantage" and not _has_alphavantage_keys():
+            raise RuntimeError(
+                "Alpha Vantage key not configured. Set ALPHAVANTAGE_API_KEY in .env"
+            )
 
-        cls = AlpacaLiveEngine if provider == "alpaca" else FinnhubLiveEngine
+        _US_ENGINES = {
+            "alpaca": AlpacaLiveEngine,
+            "finnhub": FinnhubLiveEngine,
+            "alphavantage": AlphaVantageLiveEngine,
+        }
+        cls = _US_ENGINES[provider]
         with self._lock:
             selection = ("us", provider, symbol, timeframe, strategy, fast_ema, slow_ema, pivot_left, pivot_right)
             if (
@@ -206,6 +265,7 @@ class TerminalManager:
                 status = fallback.start()
                 if not status.lower().startswith("error:"):
                     status = f"{status} (Alpaca connection limit; using Finnhub fallback)"
+            self._last_ai_compute = time.time()
             return self._engine_result(status)
 
     def select_dhan(
@@ -256,6 +316,45 @@ class TerminalManager:
             self.active_symbol = symbol
             self._selection = selection
             status = engine.start()
+            self._last_ai_compute = time.time()
+            return self._engine_result(status)
+
+    def select_delta(
+        self,
+        symbol: str,
+        timeframe: str = DEFAULT_TIMEFRAME,
+        strategy: str = "price_action",
+        fast_ema: int = 20,
+        slow_ema: int = 50,
+        pivot_left: int = 3,
+        pivot_right: int = 3,
+    ) -> dict:
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            raise ValueError("symbol is required")
+        with self._lock:
+            selection = ("delta", symbol, timeframe, strategy, fast_ema, slow_ema, pivot_left, pivot_right)
+            if (
+                self.engine is not None
+                and self.market == "delta"
+                and self._selection == selection
+                and self.engine.status not in ("stopped", "idle")
+            ):
+                return self._engine_result("ok")
+            self.stop_unlocked()
+            engine = DeltaIndiaLiveEngine(
+                symbol=symbol, timeframe=timeframe, strategy=strategy,
+                fast_ema=int(fast_ema), slow_ema=int(slow_ema),
+                pivot_left=int(pivot_left), pivot_right=int(pivot_right),
+            )
+            self._apply_pending_llm(engine)
+            self.engine = engine
+            self.market = "delta"
+            self.provider = "delta"
+            self.active_symbol = engine.symbol
+            self._selection = selection
+            status = engine.start()
+            self._last_ai_compute = time.time()
             return self._engine_result(status)
 
     def _engine_result(self, status: str) -> dict:
@@ -283,9 +382,12 @@ class TerminalManager:
         market = (market or "").strip().lower()
         if market == "dhan":
             choices = list(DHAN_PRESET_SYMBOLS)
+        elif market == "delta":
+            choices = list(DELTA_PRESET_SYMBOLS)
         else:
             choices = list(US_PRESET_SYMBOLS)
-        return {"market": "dhan" if market == "dhan" else "us", "symbols": choices}
+            market = "us"
+        return {"market": market, "symbols": choices}
 
     def stop(self) -> None:
         with self._lock:
@@ -304,12 +406,40 @@ class TerminalManager:
         self._selection = ()
         self._last_snapshot = None
 
+    def _ai_scheduler(self) -> None:
+        """Background loop that re-runs the AI/LLM analysis on the active
+        engine every ``AI_REFRESH_SECONDS`` - even when no new candle has
+        closed - so the LLM verdict stays fresh on a fixed cadence."""
+        while not self._ai_stop.is_set():
+            try:
+                with self._lock:
+                    engine = self.engine
+                if engine is not None and time.time() - self._last_ai_compute >= AI_REFRESH_SECONDS:
+                    try:
+                        res = engine.ai_signal(force=True)
+                        if res.get("status") == "ok":
+                            self._last_ai_compute = time.time()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self._ai_stop.wait(_AI_SCHEDULER_TICK)
+
     # ------------------------------------------------------------------ watchlist
 
+    def _norm_market(self, market: str) -> str:
+        m = (market or "").strip().lower()
+        return m if m in ("us", "dhan", "delta") else "us"
+
     def watchlist(self, market: str = "us") -> dict:
-        market = "dhan" if (market or "").strip().lower() == "dhan" else "us"
-        base_symbols = DEFAULT_WATCHLIST if market == "us" else DHAN_PRESET_SYMBOLS[:6]
-        symbols = list(dict.fromkeys(base_symbols + self.custom_symbols[market]))
+        market = self._norm_market(market)
+        if market == "us":
+            base_symbols = DEFAULT_WATCHLIST
+        elif market == "dhan":
+            base_symbols = DHAN_PRESET_SYMBOLS[:6]
+        else:
+            base_symbols = DELTA_PRESET_SYMBOLS[:6]
+        symbols = list(dict.fromkeys(base_symbols + self.custom_symbols.get(market, [])))
         rows = []
         error = ""
         client = self._hist_client() if market == "us" else None
@@ -331,6 +461,8 @@ class TerminalManager:
                 error = f"watchlist quotes: {exc}"
         elif market == "dhan":
             price_by_symbol, prev_by_symbol, error = self._dhan_watchlist_quotes(symbols)
+        elif market == "delta":
+            price_by_symbol, prev_by_symbol, error = self._delta_watchlist_quotes(symbols)
 
         prev_close = self._prev_closes() if market == "us" else prev_by_symbol
 
@@ -398,22 +530,43 @@ class TerminalManager:
         except Exception as exc:  # noqa: BLE001 - keep watchlist refresh alive
             return {}, {}, f"Dhan watchlist quotes: {exc}"
 
+    def _delta_watchlist_quotes(self, symbols: list[str]) -> tuple[dict, dict, str]:
+        try:
+            tickers = fetch_tickers(list(symbols))
+        except Exception as exc:
+            return {}, {}, f"Delta watchlist quotes: {exc}"
+        prices: dict[str, float] = {}
+        previous: dict[str, float] = {}
+        for sym in symbols:
+            t = tickers.get(sym.upper())
+            if not isinstance(t, dict):
+                continue
+            px = ticker_price(t)
+            if px:
+                prices[sym] = float(px)
+            try:
+                if t.get("open") is not None:
+                    previous[sym] = float(t["open"])
+            except (TypeError, ValueError):
+                pass
+        return prices, previous, ""
+
     def add_to_watchlist(self, market: str, symbol: str) -> dict:
-        market = "dhan" if (market or "").strip().lower() == "dhan" else "us"
+        market = self._norm_market(market)
         symbol = (symbol or "").strip().upper()
         if not symbol:
             raise ValueError("symbol is required")
         if len(symbol) > 30:
             raise ValueError("symbol is too long")
-        base_symbols = DEFAULT_WATCHLIST if market == "us" else DHAN_PRESET_SYMBOLS
-        if symbol not in base_symbols and symbol not in self.custom_symbols[market]:
-            self.custom_symbols[market].append(symbol)
+        base_symbols = DEFAULT_WATCHLIST if market == "us" else (DHAN_PRESET_SYMBOLS if market == "dhan" else DELTA_PRESET_SYMBOLS)
+        if symbol not in base_symbols and symbol not in self.custom_symbols.get(market, []):
+            self.custom_symbols.setdefault(market, []).append(symbol)
         return self.watchlist(market)
 
     def remove_from_watchlist(self, market: str, symbol: str) -> dict:
-        market = "dhan" if (market or "").strip().lower() == "dhan" else "us"
+        market = self._norm_market(market)
         symbol = (symbol or "").strip().upper()
-        self.custom_symbols[market] = [s for s in self.custom_symbols[market] if s != symbol]
+        self.custom_symbols[market] = [s for s in self.custom_symbols.get(market, []) if s != symbol]
         return self.watchlist(market)
 
     def _prev_closes(self) -> dict:
@@ -481,18 +634,18 @@ class TerminalManager:
             pass
         return q
 
-    def engine_for(self, symbol: str | None) -> AlpacaLiveEngine | FinnhubLiveEngine | LiveSignalEngine:
-        """Raise a clear error when no engine matches `symbol`."""
-        requested = (symbol or "").strip().upper()
+    def engine_for(self, symbol: str | None) -> AlpacaLiveEngine | FinnhubLiveEngine | AlphaVantageLiveEngine | LiveSignalEngine:
+        """Return the active engine, tolerating stale-symbol polls.
+
+        The UI polls /snapshot /candles /ai on an interval; during a
+        market/symbol switch the old symbol may still be requested for one
+        tick. Instead of 409-ing (which surfaces as
+        "engine for BTCUSD is active; request symbol=AAPL..."), serve the
+        active engine's data. Callers that truly need strict matching can
+        compare the returned engine.symbol themselves.
+        """
         if self.engine is None:
             raise RuntimeError("no symbol selected - call /api/select first")
-        if requested and self._canonical_symbol(requested) != self._canonical_symbol(
-            self.engine.symbol
-        ):
-            raise RuntimeError(
-                f"engine for {self.engine.symbol} is active; request symbol={requested} "
-                "or stop the engine first"
-            )
         return self.engine
 
     def snapshot_payload(self, symbol: str | None = None) -> dict:
@@ -523,7 +676,7 @@ class TerminalManager:
             side = "WATCH" if summary["signal"] == "HOLD" else "FLAT"
         confidence = ai.get("confidence") if ai and ai.get("confidence") else indicators.confidence(ind)
 
-        return {
+        return _sanitize_json({
             "status": engine.status,
             "symbol": engine.symbol,
             "display": summary.get("display") or engine.symbol,
@@ -555,7 +708,7 @@ class TerminalManager:
                 "fvg": ind["fvg"],
             },
             "ai": ai,
-        }
+        })
 
     def _indicator_panel(self, force: bool = False) -> dict:
         now = datetime.now(UTC).timestamp() * 1000.0
@@ -586,7 +739,7 @@ class TerminalManager:
         ind["fvg_state"] = fvgr["side"] if fvgr["found"] else None
         self._last_snapshot = ind
         self._last_snapshot_at = now
-        return ind
+        return _sanitize_json(ind)
 
     # ------------------------------------------------------------------ candles
 
@@ -630,12 +783,12 @@ class TerminalManager:
                     "position": r.get("position") if r.get("position") is not None else None,
                 }
             )
-        return {"symbol": engine.symbol, "timeframe": engine.timeframe, "seed_source": getattr(engine, "seed_source", self.provider), "bars": bars}
+        return _sanitize_json({"symbol": engine.symbol, "timeframe": engine.timeframe, "seed_source": getattr(engine, "seed_source", self.provider), "bars": bars})
 
     # ------------------------------------------------------------------ AI
 
     def _apply_pending_llm(
-        self, engine: AlpacaLiveEngine | FinnhubLiveEngine | LiveSignalEngine
+        self, engine: AlpacaLiveEngine | FinnhubLiveEngine | AlphaVantageLiveEngine | LiveSignalEngine
     ) -> None:
         provider, model, api_key = self._pending_llm
         if not provider:
@@ -695,8 +848,8 @@ class TerminalManager:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
         if res.get("status") != "ok":
-            return {"status": res.get("status"), "note": res.get("note", ""), "error": res.get("error", "")}
-        return {
+            return _sanitize_json({"status": res.get("status"), "note": res.get("note", ""), "error": res.get("error", "")})
+        return _sanitize_json({
             "status": "ok",
             "symbol": engine.symbol,
             "timestamp": res.get("timestamp"),
@@ -713,7 +866,7 @@ class TerminalManager:
             "llm_signal": res.get("llm_signal"),
             "llm_enabled": bool(res.get("llm_enabled")),
             "history": res.get("history", []),
-        }
+        })
 
     def order_preview(self, symbol: str | None, quantity: int, sl_pct: float) -> dict:
         engine = self.engine_for(symbol)

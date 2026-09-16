@@ -11,6 +11,7 @@ interface Props {
   llmProvider: string;
   llmModel: string;
   llmApiKey: string;
+  llmConn: "unknown" | "ok" | "fail";
   onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onApiKeyChange: (apiKey: string) => void;
@@ -56,7 +57,7 @@ function extraFor(name: string, m: AiModel): string {
 export default function AIAnalysis({
   ai, price, candleTime, loading, llmCatalog,
   llmProvider, llmModel, onProviderChange, onModelChange, onRefresh,
-  llmApiKey, onApiKeyChange,
+  llmApiKey, onApiKeyChange, llmConn,
 }: Props) {
   const ind = ai?.indicators ?? {};
   const models = ai?.models ?? {};
@@ -112,6 +113,35 @@ export default function AIAnalysis({
       <div className="panel-body ai-llm-hint muted">
         Ollama runs locally (no key). Others need their API key: GROQ_KEY /
         HF_API_TOKEN / OPENROUTER_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY in .env
+      </div>
+
+      <div
+        className="ai-llm-status"
+        style={{ display: "flex", alignItems: "center", gap: 7, padding: "2px 24px" }}
+      >
+        <span
+          style={{
+            width: 11,
+            height: 11,
+            borderRadius: "50%",
+            flex: "none",
+            background:
+              llmConn === "ok" ? "var(--green, #22c55e)" : llmConn === "fail" ? "var(--red, #ef4444)" : "#94a3b8",
+            boxShadow:
+              llmConn === "ok"
+                ? "0 0 6px var(--green, #22c55e)"
+                : llmConn === "fail"
+                ? "0 0 6px var(--red, #ef4444)"
+                : "none",
+          }}
+        />
+        <span className={llmConn === "ok" ? "up" : llmConn === "fail" ? "down" : "muted"}>
+          {llmConn === "ok"
+            ? "LLM Connected"
+            : llmConn === "fail"
+            ? "LLM Connection Failed"
+            : "LLM not checked yet — click Run AI Analysis"}
+        </span>
       </div>
 
       <div className="ai-body" style={loading ? { opacity: 0.55 } : undefined}>

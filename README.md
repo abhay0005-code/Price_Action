@@ -187,22 +187,35 @@ Features mirrored from the Gradio UI:
 - Live updates every ~1s over WebSocket (price + live candle); snapshot/candles refresh
   by polling. The web UI previews trades only - it never places orders.
 
-Run it (two terminals):
+Run it locally (one terminal - the backend also serves the UI):
 
 ```powershell
-# 1) backend - serves both US and Dhan live feeds
-.\.venv\Scripts\python.exe -m uvicorn server.main:app --host 0.0.0.0 --port 8000
-
-# 2) frontend
+# 1) build the UI the first time (only needed again after UI changes)
 cd web
 npm install
-npm run dev       # http://localhost:3000
+npm run build
+
+# 2) start the backend - it serves both US and Dhan live feeds AND the UI
+.\.venv\Scripts\python.exe -m uvicorn server.main:app --host 0.0.0.0 --port 8000
+
+# open http://localhost:8000
 ```
 
-Production build: `npm run build` then `npm start`. The frontend proxies REST calls
-same-origin through `/api/proxy`, which forwards to `BACKEND_URL` (default
-`http://127.0.0.1:8000`); the WebSocket connects to `NEXT_PUBLIC_WS_URL` (default
-`ws://localhost:8000`). See `web/.env.local.example`.
+The UI is a **static export** (`web/out`, built with `next build` using
+`output: "export"`) that the FastAPI backend serves from the **same port/URL** as the
+JSON API (`/api/...`) and the WebSocket feed (`/ws`) - a single service / single URL
+runs the whole app. The WebSocket defaults to the current origin, so the only optional
+env is `NEXT_PUBLIC_WS_URL` to point it elsewhere. See `web/.env.local.example`.
+
+Deploy to Railway (single service):
+
+- Point Railway's Dockerfile builder at the repo-root `Dockerfile` (which is what
+  `railway.json` already declares). It builds the Next.js UI, installs the Python deps
+  and runs one process that serves both the API and the UI on `$PORT`.
+- Open your Railway service URL (`https://<service>.up.railway.app`) and you'll see the
+  terminal UI - no more `{"detail": "Not Found"}`. The health check is `/api/health`.
+- If the root ever returns `{"detail": "Not Found"}` again, it means `web/out` isn't
+  in the image - rebuild so the backend serves `index.html` at `/`.
 
 Credentials for all three feeds come from `.env` (see above): Alpaca, Finnhub and
 Dhan. The health bar in the UI shows which feeds are configured.

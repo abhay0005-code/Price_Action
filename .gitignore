@@ -15,6 +15,12 @@ security_id_list.csv
 # Scratch / one-off scripts
 _*.py
 
+# Local review / debug artifacts
+*_diff.txt
+pat_tsc_errors.txt
+tsc_output.txt
+*.log
+
 # OS / editor
 .DS_Store
 Thumbs.db

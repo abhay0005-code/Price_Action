@@ -35,11 +35,13 @@ import SignalPanel from "@/components/SignalPanel";
 import SignalTable from "@/components/SignalTable";
 import AIAnalysis from "@/components/AIAnalysis";
 import TrendBadge from "@/components/TrendBadge";
+import StrategyBuilder from "@/components/StrategyBuilder";
 
-const DEFAULT_SYMBOL: Record<Market, string> = { us: "AAPL", dhan: "RELIANCE" };
+const DEFAULT_SYMBOL: Record<Market, string> = { us: "AAPL", dhan: "RELIANCE", delta: "BTCUSD" };
 const WATCHLIST_INTERVAL = 5000;
 const SNAPSHOT_INTERVAL = 3000;
 const CANDLES_INTERVAL = 30000;
+const AI_REFRESH_INTERVAL = 5 * 60 * 1000; // re-run the AI/LLM analysis every 5 minutes
 
 type WsReady = { instance: WebSocket | null; closed: boolean };
 
@@ -82,12 +84,14 @@ export default function Terminal() {
 
   const [ai, setAi] = useState<AiInfo | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
+  const [showBuilder, setShowBuilder] = useState(false);
 
   const [llmCatalog, setLlmCatalog] = useState<LlmCatalog | null>(null);
-  const [llmProvider, setLlmProvider] = useState("ollama");
+  const [llmProvider, setLlmProvider] = useState("gemini");
   const [llmModel, setLlmModel] = useState("");
   const [llmApiKey, setLlmApiKey] = useState("");
   const llmApiKeyRef = useRef("");
+  const [llmConn, setLlmConn] = useState<"unknown" | "ok" | "fail">("unknown");
 
   // eager refs for the WS handler
   const activeRef = useRef(activeSymbol);
@@ -279,7 +283,7 @@ export default function Terminal() {
       .then((c) => {
         if (cancelled) return;
         setLlmCatalog(c);
-        const defP = c.default_provider || "ollama";
+        const defP = c.default_provider || "gemini";
         setLlmProvider(defP);
         const defaultModels = c.models?.[defP] ?? [];
         setLlmModel((cur) => {
@@ -300,7 +304,14 @@ export default function Terminal() {
       try {
         if (llmProvider && llmModel) {
           if (checkConnection) {
-            await llmCheck(llmProvider, llmModel, llmApiKeyRef.current);
+            try {
+              await llmCheck(llmProvider, llmModel, llmApiKeyRef.current);
+              setLlmConn("ok");
+            } catch (err) {
+              setLlmConn("fail");
+              setAi({ error: await inferError(err) });
+              return;
+            }
           }
           await llmSelect(llmProvider, llmModel, llmApiKeyRef.current);
         }
@@ -320,12 +331,14 @@ export default function Terminal() {
 
   const onLlmProviderChange = (p: string) => {
     setLlmProvider(p);
+    setLlmConn("unknown");
     const modelsFor = llmCatalog?.models?.[p] ?? [];
     setLlmModel(modelsFor[0] ?? "");
   };
 
   const onLlmModelChange = (m: string) => {
     setLlmModel(m);
+    setLlmConn("unknown");
   };
 
   const onLlmApiKeyChange = (key: string) => {
@@ -341,6 +354,16 @@ export default function Terminal() {
     lastAiCandle.current = candle;
     if (backendUp) refreshAi(false);
   }, [snap?.candle_time, backendUp, refreshAi]);
+
+  // re-run the AI/LLM analysis on a fixed 5-minute cadence, even if no new
+  // candle has closed (the backend forces a fresh LLM verdict when due).
+  useEffect(() => {
+    if (!backendUp || !activeSymbol) return;
+    const id = setInterval(() => {
+      refreshAi(false);
+    }, AI_REFRESH_INTERVAL);
+    return () => clearInterval(id);
+  }, [backendUp, activeSymbol, refreshAi]);
 
   // ------------------------------------------------------------- actions
   const onSelectFromWatchlist = (symbol: string) => {
@@ -410,6 +433,18 @@ export default function Terminal() {
   return (
     <div className="terminal">
       <Header marketOpen={marketOpen} wsConnected={wsConnected} backendUp={backendUp} />
+
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button
+          className={`btn ${showBuilder ? "primary" : ""}`}
+          onClick={() => setShowBuilder((v) => !v)}
+          title="Open the Jesse strategy builder"
+        >
+          {showBuilder ? "Hide Strategy Builder" : "Strategy Builder"}
+        </button>
+      </div>
+
+      {showBuilder && <StrategyBuilder />}
 
       {backendUp === false && (
         <div className="banner error">
@@ -483,6 +518,7 @@ export default function Terminal() {
         llmProvider={llmProvider}
         llmModel={llmModel}
         llmApiKey={llmApiKey}
+        llmConn={llmConn}
         onProviderChange={onLlmProviderChange}
         onModelChange={onLlmModelChange}
         onApiKeyChange={onLlmApiKeyChange}

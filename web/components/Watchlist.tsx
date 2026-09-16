@@ -5,7 +5,7 @@ import { useState } from "react";
 
 interface Props {
   rows: WatchRow[];
-  market: "us" | "dhan";
+  market: "us" | "dhan" | "delta";
   error?: string | null;
   onSelect: (symbol: string) => void;
   onAdd: (symbol: string) => Promise<void>;
@@ -27,7 +27,9 @@ export default function Watchlist({ rows, market, error, onSelect, onAdd, onRemo
   const [symbol, setSymbol] = useState("");
   const defaultSymbols = market === "us"
     ? ["AAPL", "NVDA", "TSLA", "MSFT", "SPY", "QQQ"]
-    : ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"];
+    : market === "dhan"
+      ? ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"]
+      : ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "DOGEUSD", "BNBUSD"];
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -47,7 +49,7 @@ export default function Watchlist({ rows, market, error, onSelect, onAdd, onRemo
         <input
           value={symbol}
           onChange={(event) => setSymbol(event.target.value)}
-          placeholder={market === "us" ? "Add US symbol" : "Add NSE symbol"}
+          placeholder={market === "us" ? "Add US symbol" : market === "dhan" ? "Add NSE symbol" : "Add Delta symbol (e.g. BTCUSD)"}
           aria-label="Symbol to add"
           spellCheck={false}
         />

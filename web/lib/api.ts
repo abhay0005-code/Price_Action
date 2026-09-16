@@ -1,18 +1,17 @@
 /** Client helpers for the trading terminal backend.
  *
- * REST calls go through the same-origin Next.js proxy (`/api/proxy/...`) so
- * the browser never talks cross-origin to the Python backend. The live feed
- * uses a WebSocket straight to the FastAPI server (`NEXT_PUBLIC_WS_URL`).
+ * The FastAPI backend serves the statically exported UI, the JSON API and the
+ * WebSocket feed all from the same origin, so REST calls go straight to /api.
  */
-
-export const REST_BASE = "/api/proxy";
+export const REST_BASE = "/api";
 
 export function wsUrl(): string {
   if (typeof window === "undefined") return "";
   const fromEnv = process.env.NEXT_PUBLIC_WS_URL;
   if (fromEnv) return fromEnv && /\/ws$/.test(fromEnv) ? fromEnv : `${fromEnv}/ws`;
+  // Same-origin default: whatever host serves the page also serves /ws.
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.hostname}:8000/ws`;
+  return `${proto}//${window.location.host}/ws`;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -54,6 +53,7 @@ export interface MarketConfig {
   configured: boolean;
   alpaca?: boolean;
   finnhub?: boolean;
+  alphavantage?: boolean;
 }
 
 export interface EngineInfo {
@@ -68,7 +68,7 @@ export interface EngineInfo {
 export interface Health {
   status: string;
   configured: boolean;
-  markets: { us: MarketConfig; dhan: { configured: boolean } };
+  markets: { us: MarketConfig; dhan: { configured: boolean }; delta?: { configured: boolean } };
   market: string;
   provider: string;
   market_open: MarketClock;
@@ -358,6 +358,28 @@ export function llmCheck(provider: string, model: string, apiKey = ""): Promise<
     method: "POST",
     body: JSON.stringify({ provider, model, api_key: apiKey }),
   });
+}
+
+export interface JesseStrategyInfo {
+  name: string;
+  file?: string;
+  bytes?: number;
+  error?: string;
+}
+
+export function jesseStrategiesList(): Promise<{ ok: boolean; strategies: string[] }> {
+  return request<{ ok: boolean; strategies: string[] }>("/strategies/jesse/list");
+}
+
+export function jesseStrategiesPull(): Promise<{
+  ok: boolean;
+  target: string;
+  strategies: JesseStrategyInfo[];
+}> {
+  return request<{ ok: boolean; target: string; strategies: JesseStrategyInfo[] }>(
+    "/strategies/jesse/pull",
+    { method: "POST" }
+  );
 }
 
 export async function inferError(err: unknown): Promise<string> {

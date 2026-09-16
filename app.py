@@ -6,10 +6,11 @@ import pandas as pd
 from strategy import PriceActionStrategy
 from trend_reversal import TrendReversalStrategy
 from breakout_breakdown import BreakoutBreakdownStrategy
-from ai_signal import list_llm_providers, llm_models_for, llm_default_model
+from ai_signal import list_llm_providers, llm_models_for, llm_default_model, LLMJudge
 from dhan_feed import LiveSignalEngine
 from finnhub_feed import FinnhubLiveEngine
 from alpaca_feed import AlpacaLiveEngine
+from alphavantage_feed import AlphaVantageLiveEngine
 
 engine: LiveSignalEngine | None = None
 engine_us: FinnhubLiveEngine | None = None
@@ -19,7 +20,7 @@ _ENV_MODEL = (os.environ.get("LLM_MODEL") or "").strip()
 _PROVIDERS = list_llm_providers()
 if _ENV_PROVIDER and _ENV_PROVIDER not in _PROVIDERS:
     _PROVIDERS.append(_ENV_PROVIDER)
-_INIT_PROVIDER = _ENV_PROVIDER or "ollama"
+_INIT_PROVIDER = _ENV_PROVIDER or "gemini"
 _INIT_MODEL = _ENV_MODEL or llm_default_model(_INIT_PROVIDER)
 
 TREND_COLORS = {"UPTREND": "#16a34a", "DOWNTREND": "#dc2626", "SIDEWAYS": "#ca8a04"}
@@ -141,7 +142,12 @@ def connect_us(symbol, provider, strategy, timeframe, fast, slow, left, right):
     except Exception:
         pass
     engine_us = None
-    cls = AlpacaLiveEngine if (provider or "").lower() == "alpaca" else FinnhubLiveEngine
+    _US_ENGINES = {
+        "alpaca": AlpacaLiveEngine,
+        "finnhub": FinnhubLiveEngine,
+        "alphavantage": AlphaVantageLiveEngine,
+    }
+    cls = _US_ENGINES.get((provider or "").lower(), FinnhubLiveEngine)
     try:
         engine_us = cls(
             symbol=symbol,
@@ -171,6 +177,7 @@ def us_refresh(quantity, sl_pct, current=None, llm_provider=None, llm_model=None
         return (
             "not connected", None, "", "", "",
             gr.update(choices=[], value=None), "", "", "", "", None,
+            llm_status_html(llm_provider, llm_model),
         )
     try:
         summary, df = engine_us.snapshot()
@@ -178,11 +185,13 @@ def us_refresh(quantity, sl_pct, current=None, llm_provider=None, llm_model=None
         return (
             f"error: {exc}", None, str(exc), "", "",
             gr.update(choices=[], value=None), "", "", "", "", None,
+            llm_status_html(llm_provider, llm_model),
         )
     if summary is None:
         return (
             engine_us.status, None, engine_us.error or "", "", "",
             gr.update(choices=[], value=None), "", "", "", "", None,
+            llm_status_html(llm_provider, llm_model),
         )
     text = (
         f"INSTRUMENT: {summary['display']} | {summary['timeframe']}\n"
@@ -228,6 +237,7 @@ def us_refresh(quantity, sl_pct, current=None, llm_provider=None, llm_model=None
         ai_llm,
         ai_badge,
         ai_table,
+        llm_status_html(llm_provider, llm_model),
     )
 
 
@@ -331,21 +341,80 @@ def update_llm_models(provider):
     return gr.update(choices=models, value=value)
 
 
+_LLM_STATE: dict = {"provider": None, "model": None, "html": None}
+
+_LLM_NEUTRAL_HTML = (
+    '<div style="display:flex;align-items:center;gap:8px;font-family:sans-serif;font-size:13px;">'
+    '<span style="width:12px;height:12px;border-radius:50%;background:#94a3b8;flex:none;"></span>'
+    '<span style="color:#64748b">LLM not checked yet - click Run AI Analysis</span>'
+    '</div>'
+)
+
+
+def _llm_status_html(ok, detail):
+    color = "#16a34a" if ok else "#dc2626"
+    label = "LLM Connected" if ok else "LLM Connection Failed"
+    return (
+        f'<div style="display:flex;align-items:center;gap:8px;font-family:sans-serif;font-size:13px;">'
+        f'<span style="width:12px;height:12px;border-radius:50%;background:{color};'
+        f'box-shadow:0 0 6px {color};flex:none;"></span>'
+        f'<b style="color:{color}">{label}</b>'
+        f'<span style="color:#475569">{detail}</span>'
+        f'</div>'
+    )
+
+
+def _llm_key(provider, model):
+    return f"{(provider or '').strip().lower()}|{(model or '').strip()}"
+
+
+def check_llm_connection(provider, model):
+    """Probe the selected LLM provider and cache a green/red status badge."""
+    try:
+        judge = LLMJudge(provider, model)
+        result = judge.judge({}, "HOLD", 0.0, "connection check")
+        if "signal" not in result:
+            raise RuntimeError(result.get("reason", "LLM connection failed"))
+        html = _llm_status_html(True, f"{result.get('label') or judge.label()} responded OK")
+    except Exception as exc:
+        html = _llm_status_html(False, str(exc)[:180])
+    _LLM_STATE.update(
+        provider=(provider or "").strip().lower(),
+        model=(model or "").strip(),
+        html=html,
+    )
+    return html
+
+
+def llm_status_html(provider, model):
+    if _LLM_STATE.get("html") is not None and _llm_key(provider, model) == _llm_key(
+        _LLM_STATE.get("provider"), _LLM_STATE.get("model")
+    ):
+        return _LLM_STATE["html"]
+    return _LLM_NEUTRAL_HTML
+
+
 def run_ai_now(quantity, sl_pct, current, provider, model):
+    check_llm_connection(provider, model)
     return refresh_live(quantity, sl_pct, current, provider, model, force_ai=True)
+
+
+def us_run_ai_now(quantity, sl_pct, current, provider, model):
+    check_llm_connection(provider, model)
+    return us_refresh(quantity, sl_pct, current, provider, model, force_ai=True)
 
 
 def refresh_live(quantity, sl_pct, current=None, llm_provider=None, llm_model=None, force_ai=False):
     global engine
     if engine is None:
-        return "not connected", None, "", "", "", gr.update(choices=[], value=None), "", "", "", "", None
+        return "not connected", None, "", "", "", gr.update(choices=[], value=None), "", "", "", "", None, llm_status_html(llm_provider, llm_model)
     try:
         summary, df = engine.snapshot()
     except Exception as exc:
         return (f"error: {exc}", None, str(exc), "", "",
-                gr.update(choices=[], value=None), "", "", "", "", None)
+                gr.update(choices=[], value=None), "", "", "", "", None, llm_status_html(llm_provider, llm_model))
     if summary is None:
-        return engine.status, None, engine.error or "", "", "", gr.update(choices=[], value=None), "", "", "", "", None
+        return engine.status, None, engine.error or "", "", "", gr.update(choices=[], value=None), "", "", "", "", None, llm_status_html(llm_provider, llm_model)
     text = (
         f"INSTRUMENT: {summary['display']} | {summary['timeframe']}\n"
         f"LIVE PRICE: {summary['live_price']:.2f}\n"
@@ -412,6 +481,7 @@ def refresh_live(quantity, sl_pct, current=None, llm_provider=None, llm_model=No
         ai_llm,
         ai_badge,
         ai_table,
+        llm_status_html(llm_provider, llm_model),
     )
 
 
@@ -466,21 +536,12 @@ with gr.Blocks(title="Price Action Trading Terminal") as demo:
         )
 
 
-    with gr.Tab("Live US Market Feed (Finnhub / Alpaca)"):
-        gr.Markdown(
-            "Streams live US market data, builds candles and emits signals.\n"
-            "- **Alpaca** (recommended, no candle-403 limits): needs `APCA_API_KEY_ID=` and "
-            "`APCA_API_SECRET_KEY=` in `.env` (paper keys work: "
-            "https://app.alpaca.markets/paper)\n"
-            "- **Finnhub**: needs `FINNHUB_API_KEY=` in `.env` "
-            "(https://finnhub.io/register). Free keys cannot seed history from "
-            "/stock/candle, falling back to yfinance.\n\n"
-            "Paper-trade only - no US broker is integrated."
-        )
+    def _us_tab(provider_choices, provider_default, header_md):
+        gr.Markdown(header_md)
         with gr.Row():
             us_provider = gr.Dropdown(
-                ["alpaca", "finnhub"],
-                value="alpaca",
+                provider_choices,
+                value=provider_default,
                 label="Data Provider",
             )
             us_symbol = gr.Dropdown(
@@ -527,6 +588,7 @@ with gr.Blocks(title="Price Action Trading Terminal") as demo:
                 label="LLM Model (US)",
             )
             us_run_ai = gr.Button("Run AI Analysis", variant="primary")
+        us_llm_status = gr.HTML(value=llm_status_html(_INIT_PROVIDER, _INIT_MODEL), label="LLM Connection")
         us_ai_badge = gr.HTML(label="AI Signal Verdict")
         with gr.Row():
             us_ai_info = gr.Textbox(label="AI Analysis Breakdown", lines=13, interactive=False)
@@ -555,8 +617,9 @@ with gr.Blocks(title="Price Action Trading Terminal") as demo:
         us_outputs = [
             us_signal, us_table, us_err, us_trend, us_trade_preview,
             us_opt_dd, us_opt_info, us_ai_info, us_ai_llm, us_ai_badge, us_ai_table,
+            us_llm_status,
         ]
-        us_inputs = [us_qty, us_sl_pct, us_llm_provider, us_llm_model]
+        us_inputs = [us_qty, us_sl_pct, us_opt_dd, us_llm_provider, us_llm_model]
         us_timer.tick(
             us_refresh,
             inputs=us_inputs,
@@ -564,7 +627,38 @@ with gr.Blocks(title="Price Action Trading Terminal") as demo:
         )
         us_llm_provider.change(update_llm_models, [us_llm_provider], [us_llm_model])
         us_llm_model.change(us_refresh, us_inputs, us_outputs)
-        us_run_ai.click(us_refresh, us_inputs, us_outputs)
+        us_run_ai.click(us_run_ai_now, us_inputs, us_outputs)
+
+
+    with gr.Tab("Live US Market Feed (Finnhub / Alpaca)"):
+        _us_tab(
+            ["alpaca", "finnhub"],
+            "alpaca",
+            "Streams live US market data, builds candles and emits signals.\n"
+            "- **Alpaca** (recommended, no candle-403 limits): needs `APCA_API_KEY_ID=` and "
+            "`APCA_API_SECRET_KEY=` in `.env` (paper keys work: "
+            "https://app.alpaca.markets/paper)\n"
+            "- **Finnhub**: needs `FINNHUB_API_KEY=` in `.env` "
+            "(https://finnhub.io/register). Free keys cannot seed history from "
+            "/stock/candle, falling back to yfinance.\n\n"
+            "Paper-trade only - no US broker is integrated.",
+        )
+
+
+    with gr.Tab("Live US Market Feed (Alpha Vantage)"):
+        _us_tab(
+            ["alphavantage"],
+            "alphavantage",
+            "Streams live US market data via Alpha Vantage REST polling "
+            "(no free WebSocket), builds candles and emits signals.\n"
+            "- needs `ALPHAVANTAGE_API_KEY=` in `.env` "
+            "(https://www.alphavantage.co/support/#api-key)\n"
+            "- seeds history from `TIME_SERIES_INTRADAY`, falling back to yfinance.\n"
+            "- live price is polled from `GLOBAL_QUOTE` every "
+            "`ALPHAVANTAGE_POLL_SECONDS` (default 15s) - free keys are "
+            "rate-limited, so candles update slower than WebSocket feeds.\n\n"
+            "Paper-trade only - no US broker is integrated.",
+        )
 
 
     with gr.Tab("Live Dhan Feed"):
@@ -621,6 +715,7 @@ with gr.Blocks(title="Price Action Trading Terminal") as demo:
                 label="LLM Model",
             )
             run_ai = gr.Button("Run AI Analysis", variant="primary")
+        llm_status = gr.HTML(value=llm_status_html(_INIT_PROVIDER, _INIT_MODEL), label="LLM Connection")
         ai_badge = gr.HTML(label="AI Signal Verdict")
         with gr.Row():
             ai_info = gr.Textbox(label="AI Analysis Breakdown", lines=13, interactive=False)
@@ -662,6 +757,7 @@ with gr.Blocks(title="Price Action Trading Terminal") as demo:
         llm_outputs = [
             live_signal, live_table, err, live_trend, trade_preview,
             opt_dd, opt_info, ai_info, ai_llm, ai_badge, ai_table,
+            llm_status,
         ]
         llm_inputs = [order_qty, sl_pct, opt_dd, llm_provider, llm_model]
         timer.tick(

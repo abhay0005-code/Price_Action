@@ -76,7 +76,7 @@ class FinnhubLiveEngine:
         self._validate_credentials()
         self._finnhub = self._make_feed_client()
 
-        resolved = resolve_symbol(symbol)
+        resolved = self._resolve_symbol(symbol)
         self.symbol = resolved["symbol"]
         self.display = resolved["display"]
         self.instrument_type = resolved["instrument_type"]
@@ -137,6 +137,14 @@ class FinnhubLiveEngine:
         """Build the REST data client used for seeding history."""
         import finnhub
         return finnhub.Client(api_key=self._api_key)
+
+    def _resolve_symbol(self, symbol: str) -> dict[str, Any]:
+        """Resolve a symbol to instrument details (overridable by subclasses)."""
+        return resolve_symbol(symbol)
+
+    def _yf_tickers(self) -> list[str]:
+        """Candidate Yahoo tickers for the keyless yfinance seed fallback."""
+        return [self.symbol]
 
     def _bucket_start(self, dt: datetime) -> datetime:
         minutes_of_day = dt.hour * 60 + dt.minute
@@ -249,40 +257,43 @@ class FinnhubLiveEngine:
             return None
         interval = {5: "5m", 15: "15m", 60: "1h"}[self.minutes]
         period = f"{max(int(self.seed_days), 1)}d"
-        try:
-            df = yf.download(
-                self.symbol,
-                interval=interval,
-                period=period,
-                progress=False,
-                auto_adjust=True,
-            )
-        except Exception:
-            return None
-        if df is None or df.empty:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df.copy()
-            df.columns = df.columns.get_level_values(0)
-        rows = []
-        for ts, row in df.iterrows():
-            if pd.isna(row.get("Close")):
+        for ticker in self._yf_tickers():
+            try:
+                df = yf.download(
+                    ticker,
+                    interval=interval,
+                    period=period,
+                    progress=False,
+                    auto_adjust=True,
+                )
+            except Exception:
+                df = None
+            if df is None or df.empty:
                 continue
-            candle_time = ts.to_pydatetime()
-            if candle_time.tzinfo is None or candle_time.utcoffset() is None:
-                candle_time = candle_time.replace(tzinfo=UTC)
-            candle_time = candle_time.astimezone(UTC)
-            rows.append(
-                {
-                    "timestamp": candle_time,
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
-                    "close": float(row["Close"]),
-                    "volume": float(row["Volume"]),
-                }
-            )
-        return rows
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df.copy()
+                df.columns = df.columns.get_level_values(0)
+            rows = []
+            for ts, row in df.iterrows():
+                if pd.isna(row.get("Close")):
+                    continue
+                candle_time = ts.to_pydatetime()
+                if candle_time.tzinfo is None or candle_time.utcoffset() is None:
+                    candle_time = candle_time.replace(tzinfo=UTC)
+                candle_time = candle_time.astimezone(UTC)
+                rows.append(
+                    {
+                        "timestamp": candle_time,
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "close": float(row["Close"]),
+                        "volume": float(row["Volume"]),
+                    }
+                )
+            if rows:
+                return rows
+        return None
 
     def _seed(self) -> None:
         columns = ["timestamp", "open", "high", "low", "close", "volume"]
